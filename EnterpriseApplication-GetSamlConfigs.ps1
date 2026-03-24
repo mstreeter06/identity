@@ -1,5 +1,6 @@
 # Credit: https://github.com/orgs/msgraph/discussions/63
-# Prerequisites: Install-Module Microsoft.Graph.Applications, Microsoft.Graph.Identity.SignIns
+# Prerequisites: Install-Module Microsoft.Graph.Applications, *Microsoft.Graph.Beta.Applications*, Microsoft.Graph.Identity.SignIns
+# * To gather #PreferredTokenSigningKeyEndDateTime value, you need to use the Beta Graph Get-MgBetaServicePrincipal cmdlet *
 
 # Connect to Microsoft Graph
 Connect-MgGraph -Scopes "Application.Read.All"
@@ -22,7 +23,7 @@ foreach ($samlApp in $samlApplications) {
         # PreferredTokenSigningKeyEndDateTime is date time, compared to now and see it is valid
         PreferredTokenSigningKeyValid       = $samlApp.PreferredTokenSigningKeyEndDateTime -gt (Get-Date)
         ReplyUrls                           = $samlApp.ReplyUrls -join '|'
-        SignInAudience                      = $samlApp.SignInAudience
+        SignInAudience                      = $samlApp.SignInAudience # AzureADMyOrg = Single tenant, AzureADMultipleOrgs = Multitenant
     }
 
     $samlApplicationsArray.Add($object)
