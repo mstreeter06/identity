@@ -32,4 +32,5 @@ foreach ($samlApp in $samlApplications) {
 #return $samlApplicationsArray
 
 # Export to CSV
-$samlApplicationsArray | Export-Csv -Path ".\Temp\SamlApps.csv" -Encoding UTF8 -NoClobber -NoTypeInformation 
+$dateTime = Get-Date -Format "yyyMMdd-HHmmss"
+$samlApplicationsArray | Export-Csv -Path ".\Temp\SamlApps-$dateTime.csv" -Encoding UTF8 -NoClobber -NoTypeInformation 
