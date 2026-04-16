@@ -76,9 +76,13 @@ if ($groupMembers.Count -eq 0) {
 
 #region Check Authentication Methods for Each User (Optimized with Batching)
 $reportResults = [System.Collections.Generic.List[PSCustomObject]]::new()
-$batchSize = 20  # Max 20 requests per batch (Graph API limit)
+$maxBatchRequests = 20  # Graph batch limit
+$requestsPerUser = 3
+$batchSize = [math]::Floor($maxBatchRequests / $requestsPerUser)
+if ($batchSize -lt 1) { $batchSize = 1 }
 
 Write-Host "Checking authentication methods for each user (using batched requests)..." -ForegroundColor Cyan
+Write-Host "Batching $batchSize users per batch (up to $($batchSize * $requestsPerUser) requests per batch)..." -ForegroundColor Cyan
 
 # Split users into batches
 $userBatches = @()
@@ -119,7 +123,8 @@ foreach ($batch in $userBatches) {
 
     # Send batch request
     try {
-        $batchResponse = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/`$batch" -Body @{ requests = $requests } -ErrorAction Stop
+        $batchBody = @{ requests = $requests } | ConvertTo-Json -Depth 5
+        $batchResponse = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/`$batch" -Body $batchBody -ContentType 'application/json' -ErrorAction Stop
     }
     catch {
         Write-Warning "Batch request failed for a set of users. Error: $($_.Exception.Message). Skipping batch."
