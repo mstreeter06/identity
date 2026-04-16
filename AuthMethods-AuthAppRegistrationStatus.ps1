@@ -1,15 +1,20 @@
 # AuthMethods-AuthAppRegistrationStatus.ps1
 # This script gets the registration status of Microsoft Authenticator App as an authentication method for members of a security group
 # V1.0 - 16-Apr-2026 - Initial version
+# V1.1 - 16-Apr-2026 - Move GroupName and OutputCsvPath to Parameters
+# V1.2 - 16-Apr-2026 - Large group optimization by batching API requests
 
 # Prerequisites:
 # Install-Module Microsoft.Graph.Groups
 # Install-Module Microsoft.Graph.Users.Authentication
 
-#region Configuration
-$SecurityGroupName = "GROUPNAME" # <--- IMPORTANT: Replace with the actual name of your security group
-$OutputCsvPath     = ".\UsersWithoutAuthenticator-$((Get-Date).ToString('yyyyMMdd_HHmmss')).csv"
-#endregion
+param(
+    [Parameter(Mandatory=$true)]
+    [string]$GroupName,
+
+    [Parameter(Mandatory=$true)]
+    [string]$OutputCsvPath
+)
 
 #region Connect to Microsoft Graph
 # Scopes required:
@@ -33,11 +38,11 @@ catch {
 #endregion
 
 #region Get Security Group and Members
-Write-Host "Searching for security group: '$SecurityGroupName'..." -ForegroundColor Cyan
+Write-Host "Searching for security group: '$GroupName'..." -ForegroundColor Cyan
 try {
-    $group = Get-MgGroup -Filter "DisplayName eq '$SecurityGroupName'" -ErrorAction Stop
+    $group = Get-MgGroup -Filter "DisplayName eq '$GroupName'" -ErrorAction Stop
     if (-not $group) {
-        Write-Warning "No security group found with the name '$SecurityGroupName'."
+        Write-Warning "No security group found with the name '$GroupName'."
         Disconnect-MgGraph
         return
     }
@@ -69,78 +74,129 @@ if ($groupMembers.Count -eq 0) {
 }
 #endregion
 
-#region Check Authentication Methods for Each User
+#region Check Authentication Methods for Each User (Optimized with Batching)
 $reportResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+$batchSize = 20  # Max 20 requests per batch (Graph API limit)
 
-Write-Host "Checking authentication methods for each user..." -ForegroundColor Cyan
-foreach ($member in $groupMembers) {
-    $userId = $member.Id
+Write-Host "Checking authentication methods for each user (using batched requests)..." -ForegroundColor Cyan
 
-    # Fetch user details including SignInActivity
+# Split users into batches
+$userBatches = @()
+for ($i = 0; $i -lt $groupMembers.Count; $i += $batchSize) {
+    $userBatches += ,@($groupMembers[$i..([math]::Min($i + $batchSize - 1, $groupMembers.Count - 1))])
+}
+
+foreach ($batch in $userBatches) {
+    $requests = @()
+    $requestId = 0
+
+    # Build batch requests for each user in the batch
+    foreach ($member in $batch) {
+        $userId = $member.Id
+        $requestId++
+
+        # Request 1: Get user details (with SignInActivity)
+        $requests += @{
+            id     = "$requestId-user"
+            method = "GET"
+            url    = "/users/$userId?`$select=UserPrincipalName,DisplayName,SignInActivity"
+        }
+
+        # Request 2: Get manager
+        $requests += @{
+            id     = "$requestId-manager"
+            method = "GET"
+            url    = "/users/$userId/manager?`$select=displayName,mail,userPrincipalName"
+        }
+
+        # Request 3: Get auth methods
+        $requests += @{
+            id     = "$requestId-auth"
+            method = "GET"
+            url    = "/users/$userId/authentication/methods"
+        }
+    }
+
+    # Send batch request
     try {
-        $fullUser = Get-MgUser -UserId $userId -Property UserPrincipalName, DisplayName, SignInActivity -ErrorAction Stop
-        $userPrincipalName = $fullUser.UserPrincipalName
-        $displayName       = $fullUser.DisplayName
+        $batchResponse = Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/`$batch" -Body @{ requests = $requests } -ErrorAction Stop
     }
     catch {
-        Write-Warning "Could not retrieve details for user ID: $userId. Skipping."
+        Write-Warning "Batch request failed for a set of users. Error: $($_.Exception.Message). Skipping batch."
         continue
     }
 
-    # Fetch Manager info
-    $managerName = "N/A"
-    $managerMail = "N/A"
-    try {
-        $manager = Get-MgUserManager -UserId $userId -ErrorAction SilentlyContinue
-        if ($null -ne $manager) {
-            $managerName = $manager.AdditionalProperties['displayName']
-            $managerMail = $manager.AdditionalProperties['mail']
-            if ([string]::IsNullOrWhiteSpace($managerMail)) { $managerMail = $manager.AdditionalProperties['userPrincipalName'] }
+    # Process batch responses
+    $userData = @{}
+    foreach ($response in $batchResponse.responses) {
+        $parts = $response.id -split '-'
+        $reqId = $parts[0]
+        $type = $parts[1]
+        $userId = $batch[$reqId - 1].Id  # Map back to user
+
+        if (-not $userData.ContainsKey($userId)) {
+            $userData[$userId] = @{
+                UserDetails = $null
+                Manager     = $null
+                AuthMethods = @()
+            }
         }
-    } catch {
-        # Manager might not be assigned or is inaccessible
+
+        if ($response.status -eq 200) {
+            switch ($type) {
+                'user'   { $userData[$userId].UserDetails = $response.body }
+                'manager' { $userData[$userId].Manager = $response.body }
+                'auth'   { $userData[$userId].AuthMethods = $response.body.value }
+            }
+        }
+        else {
+            Write-Warning "Failed to retrieve $type for user ID: $userId. Status: $($response.status)"
+        }
     }
 
-    Write-Host "Processing user: $displayName ($userPrincipalName)" -NoNewline
+    # Build report for this batch
+    foreach ($userId in $userData.Keys) {
+        $data = $userData[$userId]
+        if (-not $data.UserDetails) { continue }  # Skip if user details failed
 
-    $hasAuthenticator = $false
-    try {
-        $authMethods = Get-MgUserAuthenticationMethod -UserId $userId -ErrorAction SilentlyContinue
-        foreach ($method in $authMethods) {
-            # The Microsoft Authenticator app typically registers as a MicrosoftAuthenticatorAuthenticationMethod
-            # or sometimes as a Fido2AuthenticationMethod if it's a passwordless sign-in.
-            # For this specific request, we'll focus on MicrosoftAuthenticatorAuthenticationMethod.
-            if ($method.AdditionalProperties['@odata.type'] -eq '#microsoft.graph.microsoftAuthenticatorAuthenticationMethod') {
+        $userPrincipalName = $data.UserDetails.UserPrincipalName
+        $displayName       = $data.UserDetails.DisplayName
+        $lastSignIn        = $data.UserDetails.SignInActivity.LastSignInDateTime
+        $lastSuccessfulSignIn = $data.UserDetails.SignInActivity.LastSuccessfulSignInDateTime
+
+        # Manager info
+        $managerName = "N/A"
+        $managerMail = "N/A"
+        if ($data.Manager) {
+            $managerName = $data.Manager.displayName
+            $managerMail = $data.Manager.mail
+            if ([string]::IsNullOrWhiteSpace($managerMail)) { $managerMail = $data.Manager.userPrincipalName }
+        }
+
+        # Authenticator check
+        $hasAuthenticator = $false
+        foreach ($method in $data.AuthMethods) {
+            if ($method.'@odata.type' -eq '#microsoft.graph.microsoftAuthenticatorAuthenticationMethod') {
                 $hasAuthenticator = $true
                 break
             }
         }
-    }
-    catch {
-        Write-Warning "Could not retrieve authentication methods for user $userPrincipalName. Error: $($_.Exception.Message)"
-        # Assume no authenticator if we can't check
-        $hasAuthenticator = $false
-    }
+        $status = if ($hasAuthenticator) { "Registered" } else { "Not Registered" }
 
-    $status = if ($hasAuthenticator) { "Registered" } else { "Not Registered" }
-    if ($hasAuthenticator) {
-        Write-Host " -> Microsoft Authenticator registered." -ForegroundColor Green
-    }
-    else {
-        Write-Host " -> NO Microsoft Authenticator registered." -ForegroundColor Red
-    }
+        Write-Host "Processed user: $displayName ($userPrincipalName) -> $status" -ForegroundColor (if ($hasAuthenticator) { 'Green' } else { 'Red' })
 
-    $reportResults.Add([PSCustomObject]@{
-        DisplayName                  = $displayName
-        UserPrincipalName            = $userPrincipalName
-        UserId                       = $userId
-        ManagerName                  = $managerName
-        ManagerEmail                 = $managerMail
-        AuthenticatorStatus          = $status
-        LastSignInDateTime           = $fullUser.SignInActivity.LastSignInDateTime
-        LastSuccessfulSignInDateTime = $fullUser.SignInActivity.LastSuccessfulSignInDateTime
-        Group                        = $group.DisplayName
-    })
+        $reportResults.Add([PSCustomObject]@{
+            DisplayName                  = $displayName
+            UserPrincipalName            = $userPrincipalName
+            UserId                       = $userId
+            ManagerName                  = $managerName
+            ManagerEmail                 = $managerMail
+            AuthenticatorStatus          = $status
+            LastSignInDateTime           = $lastSignIn
+            LastSuccessfulSignInDateTime = $lastSuccessfulSignIn
+            Group                        = $group.DisplayName
+        })
+    }
 }
 #endregion
 
