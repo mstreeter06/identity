@@ -80,9 +80,9 @@ Write-Host "Checking authentication methods for each user..." -ForegroundColor C
 foreach ($member in $groupMembers) {
     $userId = $member.Id
 
-    # Fetch user details including SignInActivity
+    # Fetch user details including SignInActivity and CreatedDateTime
     try {
-        $fullUser = Get-MgUser -UserId $userId -Property UserPrincipalName, DisplayName, SignInActivity -ErrorAction Stop
+        $fullUser = Get-MgUser -UserId $userId -Property UserPrincipalName, DisplayName, SignInActivity, CreatedDateTime -ErrorAction Stop
         $userPrincipalName = $fullUser.UserPrincipalName
         $displayName       = $fullUser.DisplayName
     }
@@ -143,6 +143,7 @@ foreach ($member in $groupMembers) {
         AuthenticatorStatus          = $status
         LastSignInDateTime           = $fullUser.SignInActivity.LastSignInDateTime
         LastSuccessfulSignInDateTime = $fullUser.SignInActivity.LastSuccessfulSignInDateTime
+        AccountCreated               = $fullUser.CreatedDateTime
         Group                        = $group.DisplayName
     })
 }
