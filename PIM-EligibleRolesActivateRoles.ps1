@@ -1,3 +1,7 @@
+# PIM-EligibleRolesActivateRoles.ps1
+# This script allows a user to view their eligible roles in Azure AD PIM and activate selected roles with a justification and duration.
+# V1.0 - 30-Apr-2026 - Initial version
+
 # Make sure you are connected to Microsoft Graph with the necessary scopes.
 # For this script, you will need at least "RoleManagement.ReadWrite.Directory" to activate roles.
 # Example: Connect-MgGraph -Scopes "User.Read.All", "RoleManagement.ReadWrite.Directory"
@@ -58,7 +62,7 @@ if (-not $selectedRoles) {
 Write-Host "`nSelected Roles for Activation:" -ForegroundColor Magenta
 $selectedRoles | Format-Table -Property RoleDisplayName, CreatedDateTime, MemberType -AutoSize
 
-# --- Prompt for Activation Details ---
+# Prompt for Activation Details - Justification and Duration
 $justification = Read-Host "Enter a justification for activating these roles"
 if ([string]::IsNullOrWhiteSpace($justification)) {
     Write-Warning "Justification cannot be empty. Exiting."
@@ -71,7 +75,7 @@ if ($durationHours -le 0) {
     $durationHours = 8
 }
 
-# --- Activate each selected role ---
+# Activate each selected role by creating a role assignment schedule request
 foreach ($roleToActivate in $selectedRoles) {
     Write-Host "`nAttempting to activate role: $($roleToActivate.RoleDisplayName)" -ForegroundColor Cyan
 
